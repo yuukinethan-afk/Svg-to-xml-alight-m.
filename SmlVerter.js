@@ -1356,7 +1356,6 @@
   var SkipContainerTags = /* @__PURE__ */ new Set(["defs", "metadata", "script", "radialGradient", "mask", "clipPath", "pattern", "symbol", "title", "desc", "sodipodi:namedview"]);
   var UnsupportedDrawableTags = /* @__PURE__ */ new Set(["image"]);
   var SvgToAlightBlending = { multiply: "multiply", screen: "screen", overlay: "overlay", darken: "darken", lighten: "lighten", "color-dodge": "color-dodge", "color-burn": "color-burn", "hard-light": "hard-light", "soft-light": "soft-light", difference: "diff", exclusion: "exclusion", hue: "hue", saturation: "saturation", color: "color", luminosity: "luminance" };
-  var groupSeq = 0;
   function parseSvgToVectorProject(svgText, inputPath, options = {}) {
     const warnings = [];
     const parser = new DOMParser({ errorHandler: { warning: () => void 0, error: (message) => warnings.push({ code: "SVG_XML_ERROR", message }), fatalError: (message) => warnings.push({ code: "SVG_XML_FATAL", message }) } });
@@ -1373,33 +1372,7 @@
     const skipped = { count: 0 };
     const initialStyle = readStyle(root, cssRules, { fill: "black", fillOpacity: 1, opacity: 1, stroke: void 0, strokeWidth: void 0, strokeOpacity: 1, strokeLinecap: void 0, strokeLinejoin: void 0, filter: void 0, display: void 0, visibility: void 0, mixBlendMode: void 0 });
     visitChildren(root, initialStyle, IdentityMatrix, viewport, gradients, filters, cssRules, layers, warnings, skipped, options);
-    {
-      const maxNodes = typeof options.maxNodes === "number" ? options.maxNodes : (typeof globalThis.SML_MAX_NODES === "number" ? globalThis.SML_MAX_NODES : 3500);
-      const span = Math.max(viewport.width, viewport.height);
-      const original = layers.slice();
-      let eps = 0.0006 * span, expanded;
-      for (let attempt = 0; attempt < 14; attempt += 1) {
-        skippedSmall = 0; bhIdSeq = 0; bhEps = eps; bhPlaced = [];
-        expanded = expandLayers(original, viewport, options);
-        if (!(maxNodes > 0) || countNodes(expanded) <= maxNodes || eps > 0.012 * span) break;
-        eps *= 1.35;
-      }
-      globalThis.SML_LAST_STATS = { nodes: countNodes(expanded), eps };
-      layers.length = 0; layers.push(...expanded);
-    }
-    skipped.count += skippedSmall;
-    let projFps = DefaultFps, projTime = DefaultDurationMs, projBg = "#ffffffff";
-    if (!globalThis.SML_KEEP_GROUPS) {
-      // PATCHED: meniru XML referensi Alight: semua shape rata (tanpa group bersarang) di dalam SATU embedScene "SVG Lossless Layer"
-      const flat = [];
-      const walk = (list) => { for (const l of list) { if (l.kind === "group") walk(l.layers); else flat.push(l); } };
-      walk(layers);
-      flat.forEach((l, i) => { l.id = 310000001 + i; });
-      layers.length = 0;
-      layers.push({ kind: "group", id: 300000001, label: "SVG Lossless Layer", layers: flat });
-      projFps = 30; projTime = 1000; projBg = "#00000000";
-    }
-    const project = { metadata: { title, width: viewport.width, height: viewport.height, fps: projFps, totalTime: projTime, backgroundColor: projBg }, layers, warnings, skippedElements: skipped.count };
+    const project = { metadata: { title, width: viewport.width, height: viewport.height, fps: DefaultFps, totalTime: DefaultDurationMs, backgroundColor: "#ffffffff" }, layers, warnings, skippedElements: skipped.count };
     if (layers.length === 0) throw new Error("No supported SVG vector layers were found.");
     return { project };
   }
@@ -1413,15 +1386,6 @@
       const nextStyle = readStyle(element, cssRules, style);
       const nextMatrix = multiplyMatrices(parentMatrix, parseTransform(element.getAttribute("transform")));
       if (nextStyle.display === "none" || nextStyle.visibility === "hidden") { skipped.count += 1; continue; }
-      if (tag === "g" && options.groups !== false && (element.getAttribute("id") || element.getAttribute("aria-label"))) {
-        // PATCHED: <g id="..."> -> grup Alight Motion (embedScene)
-        groupSeq += 1;
-        const sub = [];
-        const subOptions = { ...options, idBase: (options.idBase ?? 1e8) + groupSeq * 1e5, maxLayers: void 0 };
-        visitChildren(element, nextStyle, nextMatrix, viewport, gradients, filters, cssRules, sub, warnings, skipped, subOptions);
-        if (sub.length) layers.push({ kind: "group", id: (options.idBase ?? 1e8) + layers.length, label: element.getAttribute("id") || element.getAttribute("aria-label"), layers: sub });
-        continue;
-      }
       if (tag === "g" || tag === "svg") { visitChildren(element, nextStyle, nextMatrix, viewport, gradients, filters, cssRules, layers, warnings, skipped, options); continue; }
       if (tag === "style" || tag === "lineargradient" || tag === "filter" || SkipContainerTags.has(tag)) continue;
       if (UnsupportedDrawableTags.has(tag)) { skipped.count += 1; warnings.push({ code: "UNSUPPORTED_ELEMENT", message: `<${tag}> is not supported yet and was skipped.` }); continue; }
@@ -1760,10 +1724,8 @@
   var AlightMotionVersion = "com.alightcreative.motion/5.0.273.1028425";
   var AlightMotionVersionCode = "1028425";
   var FileFormatVersion = "106";
-  var RenderFps = 24;
   function exportAlightMotionXml(project) {
     const scene = project.metadata;
-    RenderFps = scene.fps;
     const lines = [
       "<?xml version='1.0' encoding='UTF-8' ?>",
       `<!--`, `Created by SML Verter`, `Based on observed Alight Motion XML export structure`, `-->`,
@@ -1826,204 +1788,9 @@
     }
     return area / 2;
   }
-  // PATCHED: Alight Motion tidak membaca lubang (exclude). Lubang disambung ke bentuk luarnya lewat "jembatan" selebar nol,
-  // jadi satu kontur tanpa lubang yang tetap tampil sebagai cincin. Tidak butuh urutan layer khusus.
-  function bhParse(sub) {
-    const t = sub.match(/[MLCZmlcz]|-?\d*\.?\d+(?:e[-+]?\d+)?/giu) || [];
-    let i = 0, cmd = null, start = null, cur = null; const segs = [];
-    const num = () => Number.parseFloat(t[i++]);
-    while (i < t.length) {
-      if (/[A-Za-z]/u.test(t[i])) { cmd = t[i++]; if (cmd === "z" || cmd === "Z") continue; }
-      if (cmd === "M") { cur = [num(), num()]; if (!start) start = cur; cmd = "L"; }
-      else if (cmd === "L") { cur = [num(), num()]; segs.push({ t: "L", p: cur }); }
-      else if (cmd === "C") { const c1 = [num(), num()], c2 = [num(), num()]; cur = [num(), num()]; segs.push({ t: "C", c1, c2, p: cur }); }
-      else return null;
-    }
-    if (!start || segs.length < 2) return null;
-    const last = segs[segs.length - 1].p;
-    if (Math.hypot(last[0] - start[0], last[1] - start[1]) > 1e-6) segs.push({ t: "L", p: start });
-    else segs[segs.length - 1].p = start;
-    return { start, segs };
-  }
-  function bhAnchors(sp) { const a = [sp.start]; for (let i = 0; i < sp.segs.length - 1; i += 1) a.push(sp.segs[i].p); return a; }
-  function bhArea(sp) { const a = bhAnchors(sp); let s = 0; for (let i = 0; i < a.length; i += 1) { const q = a[(i + 1) % a.length]; s += a[i][0] * q[1] - q[0] * a[i][1]; } return s / 2; }
-  function bhInside(pt, sp) {
-    const a = bhAnchors(sp); let c = false;
-    for (let i = 0, j = a.length - 1; i < a.length; j = i++) {
-      const [xi, yi] = a[i], [xj, yj] = a[j];
-      if ((yi > pt[1]) !== (yj > pt[1]) && pt[0] < (xj - xi) * (pt[1] - yi) / (yj - yi) + xi) c = !c;
-    }
-    return c;
-  }
-  function bhRotate(sp, k) {
-    if (k === 0) return sp.segs.slice();
-    // segmen j (1..n) berjalan dari anchor j-1 ke anchor j (anchor n = anchor 0)
-    return sp.segs.slice(k).concat(sp.segs.slice(0, k));
-  }
-  // PATCHED: sederhanakan path supaya jumlah node kecil (Alight berat/crash kalau node terlalu banyak)
-  var bhEps = 0;
-  function bhRdp(pts, eps) {
-    if (pts.length < 3) return pts;
-    const keep = new Uint8Array(pts.length); keep[0] = keep[pts.length - 1] = 1;
-    const stack = [[0, pts.length - 1]];
-    while (stack.length) {
-      const [a, b] = stack.pop(); const [ax, ay] = pts[a], [bx, by] = pts[b];
-      const dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy) || 1e-9;
-      let max = 0, idx = -1;
-      for (let i = a + 1; i < b; i += 1) { const d = Math.abs(dy * (pts[i][0] - ax) - dx * (pts[i][1] - ay)) / len; if (d > max) { max = d; idx = i; } }
-      if (max > eps && idx > 0) { keep[idx] = 1; stack.push([a, idx], [idx, b]); }
-    }
-    return pts.filter((_, i) => keep[i]);
-  }
-  function bhSimplify(sp, eps) {
-    if (!(eps > 0)) return sp;
-    {
-      // PATCHED: eps adaptif - bentuk kecil/tipis (mulut, mata) tidak ikut disederhanakan kasar
-      let x0 = sp.start[0], x1 = x0, y0 = sp.start[1], y1 = y0;
-      for (const sg of sp.segs) { const q = sg.p; if (q[0] < x0) x0 = q[0]; if (q[0] > x1) x1 = q[0]; if (q[1] < y0) y0 = q[1]; if (q[1] > y1) y1 = q[1]; }
-      const dim = Math.max(1e-6, Math.min(x1 - x0, y1 - y0));
-      eps = Math.min(eps, dim * 0.25);
-    }
-    const pts = [sp.start];
-    for (const sg of sp.segs) {
-      const p0 = pts[pts.length - 1];
-      if (sg.t === "L") pts.push(sg.p);
-      else for (let k = 1; k <= 8; k += 1) {
-        const u = k / 8, a = (1 - u) ** 3, b = 3 * u * (1 - u) ** 2, c = 3 * u * u * (1 - u), d = u ** 3;
-        pts.push([a * p0[0] + b * sg.c1[0] + c * sg.c2[0] + d * sg.p[0], a * p0[1] + b * sg.c1[1] + c * sg.c2[1] + d * sg.p[1]]);
-      }
-    }
-    pts.pop();
-    if (pts.length < 4) return sp;
-    let far = 0, fd = -1;
-    for (let i = 1; i < pts.length; i += 1) { const d = (pts[i][0] - pts[0][0]) ** 2 + (pts[i][1] - pts[0][1]) ** 2; if (d > fd) { fd = d; far = i; } }
-    const h1 = bhRdp(pts.slice(0, far + 1), eps), h2 = bhRdp(pts.slice(far).concat([pts[0]]), eps);
-    h1.pop(); h2.pop();
-    const q = h1.concat(h2); const m = q.length;
-    if (m < 3) return null;
-    const cornerCos = Math.cos(70 * Math.PI / 180);
-    const isCorner = (a, b, c) => {
-      const u = [b[0] - a[0], b[1] - a[1]], v = [c[0] - b[0], c[1] - b[1]];
-      const lu = Math.hypot(u[0], u[1]) || 1, lv = Math.hypot(v[0], v[1]) || 1;
-      return (u[0] * v[0] + u[1] * v[1]) / (lu * lv) < cornerCos;
-    };
-    const cap = (from, to, vx, vy) => { const dl = Math.hypot(to[0] - from[0], to[1] - from[1]), l = Math.hypot(vx, vy); const k = l > 0.4 * dl && l > 0 ? 0.4 * dl / l : 1; return [from[0] + vx * k, from[1] + vy * k]; };
-    const segs = [];
-    for (let i = 0; i < m; i += 1) {
-      const p0 = q[(i - 1 + m) % m], p1 = q[i], p2 = q[(i + 1) % m], p3 = q[(i + 2) % m];
-      const k1 = isCorner(p0, p1, p2), k2 = isCorner(p1, p2, p3);
-      if (k1 && k2) segs.push({ t: "L", p: p2 });
-      else segs.push({ t: "C", c1: k1 ? p1 : cap(p1, p2, (p2[0] - p0[0]) / 6, (p2[1] - p0[1]) / 6), c2: k2 ? p2 : cap(p2, p1, -(p3[0] - p1[0]) / 6, -(p3[1] - p1[1]) / 6), p: p2 });
-    }
-    return { start: q[0], segs };
-  }
-  function bhFmt(v) { return String(Math.round(v * 1e3) / 1e3); }
-  function bhSerialize(sp) {
-    let d = `M${bhFmt(sp.start[0])} ${bhFmt(sp.start[1])}`;
-    for (const sg of sp.segs) {
-      d += sg.t === "L" ? `L${bhFmt(sg.p[0])} ${bhFmt(sg.p[1])}`
-        : `C${bhFmt(sg.c1[0])} ${bhFmt(sg.c1[1])} ${bhFmt(sg.c2[0])} ${bhFmt(sg.c2[1])} ${bhFmt(sg.p[0])} ${bhFmt(sg.p[1])}`;
-    }
-    return d + "z";
-  }
-  // Pecah path jadi komponen terpisah: tiap bentuk luar jadi satu kontur, lubang disambung ke bentuk luarnya.
-  // (Alight hanya memakai satu kontur per shape, jadi tiap komponen harus jadi layer sendiri.)
-  function bhComponents(pathData, onHole) {
-    const parts = pathData.trim().split(/(?=M)/u).map((x) => x.trim()).filter(Boolean);
-    let subs = parts.map(bhParse);
-    if (!parts.length || subs.some((x) => !x)) return null;
-    const mainSign0 = bhArea(subs[0]) >= 0;
-    subs = subs.map((sp, i) => ({ sp: bhSimplify(sp, bhEps), i })).filter((o) => o.sp);
-    if (!subs.length || subs[0].i !== 0) return [];
-    subs = subs.map((o) => o.sp);
-    const areas = subs.map(bhArea); const mainSign = areas[0] >= 0;
-    const holeIdx = []; const pos = [];
-    subs.forEach((sp, i) => { if (i > 0 && (areas[i] >= 0) !== mainSign) holeIdx.push(i); else pos.push(sp); });
-    holeIdx.sort((a, b) => Math.abs(areas[b]) - Math.abs(areas[a]));
-    const fillsOf = new Map();
-    for (const hi of holeIdx) {
-      const hole = subs[hi]; const ha = bhAnchors(hole);
-      let cands = pos.filter((c) => bhInside(ha[0], c));
-      if (!cands.length) cands = pos;
-      cands.sort((a, b) => Math.abs(bhArea(a)) - Math.abs(bhArea(b)));
-      const cont = cands[0]; const ca = bhAnchors(cont);
-      const colour = onHole ? onHole(hole) : null;
-      if (colour) { if (!fillsOf.has(cont)) fillsOf.set(cont, []); fillsOf.get(cont).push({ sp: hole, colour }); continue; }
-      let bk = 0, bm = 0, bd = Infinity;
-      for (let k = 0; k < ca.length; k += 1) for (let m = 0; m < ha.length; m += 1) {
-        const d = (ca[k][0] - ha[m][0]) ** 2 + (ca[k][1] - ha[m][1]) ** 2;
-        if (d < bd) { bd = d; bk = k; bm = m; }
-      }
-      const outerSegs = bhRotate(cont, bk); const holeSegs = bhRotate(hole, bm);
-      const a = ca[bk], h = ha[bm];
-      cont.start = a;
-      cont.segs = outerSegs.concat([{ t: "L", p: h }], holeSegs, [{ t: "L", p: a }]);
-    }
-    return pos.map((sp) => ({ sp, d: bhSerialize(sp), area: Math.abs(bhArea(sp)), fills: (fillsOf.get(sp) || []).map((f) => ({ sp: f.sp, d: bhSerialize(f.sp), area: Math.abs(bhArea(f.sp)), colour: f.colour })) })).sort((a, b) => b.area - a.area);
-  }
-  var bhPlaced = [];
-  function bhColourAt(hole) {
-    const an = bhAnchors(hole); if (!an.length) return null;
-    let cx = 0, cy = 0; for (const p of an) { cx += p[0]; cy += p[1]; } const pts = [[cx / an.length, cy / an.length]];
-    for (let i = 0; i < an.length; i += 1) { const a = an[i], b = an[(i + Math.floor(an.length / 2)) % an.length]; pts.push([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]); }
-    const pt = pts.find((p) => bhInside(p, hole));
-    if (!pt) return null;
-    for (let i = bhPlaced.length - 1; i >= 0; i -= 1) if (bhInside(pt, bhPlaced[i].sp)) return bhPlaced[i].colour;
-    return null;
-  }
-  function bridgeHoles(pathData) {
-    const comps = bhComponents(pathData);
-    return comps && comps.length === 1 ? comps[0].d : pathData;
-  }
-  var bhIdSeq = 0;
-  function expandLayers(list, viewport, options) {
-    const pct = typeof options.minAreaPct === "number" ? options.minAreaPct : (typeof globalThis.SML_MIN_AREA_PCT === "number" ? globalThis.SML_MIN_AREA_PCT : 0.01);
-    const minArea = viewport.width * viewport.height * pct / 100;
-    const out = [];
-    for (const layer of list) {
-      if (layer.kind === "group") {
-        const inner = expandLayers(layer.layers, viewport, options);
-        if (inner.length) out.push({ ...layer, layers: inner });
-      } else if (layer.kind === "shape" && !layer.stroke && layer.pathData) {
-        const comps = bhComponents(layer.pathData, layer.fillType === "gradient" ? null : bhColourAt);
-        if (!comps) { out.push(layer); continue; }
-        let k = 0;
-        for (const c of comps) {
-          if (c.area < minArea) { skippedSmall += 1; continue; }
-          out.push({ ...layer, id: k === 0 ? layer.id : 9e8 + (bhIdSeq += 1), label: comps.length > 1 ? `${layer.label}.${k + 1}` : layer.label, pathData: c.d });
-          bhPlaced.push({ sp: c.sp, colour: layer.fillColor });
-          k += 1;
-          for (const f of c.fills) {
-            if (f.area < minArea) continue;
-            out.push({ ...layer, id: 9e8 + (bhIdSeq += 1), label: `${layer.label}.f${k}`, fillColor: f.colour, fillType: "color", gradient: void 0, pathData: f.d });
-            bhPlaced.push({ sp: f.sp, colour: f.colour });
-          }
-        }
-      } else out.push(layer);
-    }
-    return out;
-  }
-  function countNodes(list) {
-    let n = 0;
-    for (const l of list) { if (l.kind === "group") n += countNodes(l.layers); else if (l.pathData) n += (l.pathData.match(/[LC]/g) || []).length + 1; }
-    return n;
-  }
-  var skippedSmall = 0;
-  // PATCHED: format path meniru XML referensi Alight: "M x y", "L x y", "C x1 y1, x2 y2, x y", "Z"
-  function refPath(sp) {
-    let d = `M ${bhFmt(sp.start[0])} ${bhFmt(sp.start[1])}`;
-    for (const sg of sp.segs) {
-      d += sg.t === "L" ? `L ${bhFmt(sg.p[0])} ${bhFmt(sg.p[1])}`
-        : `C ${bhFmt(sg.c1[0])} ${bhFmt(sg.c1[1])}, ${bhFmt(sg.c2[0])} ${bhFmt(sg.c2[1])}, ${bhFmt(sg.p[0])} ${bhFmt(sg.p[1])}`;
-    }
-    return d + "Z";
-  }
   function renderPathContours(pathData, indent) {
     const subpaths = splitSubpaths(pathData);
-    if (subpaths.length <= 1) {
-      const sp = bhParse(pathData.trim());
-      return [`${indent}<path d="${escapeXmlAttribute(sp ? refPath(sp) : pathData)}" />`];
-    }
+    if (subpaths.length <= 1) return [`${indent}<path d="${escapeXmlAttribute(pathData)}" />`];
     const lines = []; const mainArea = computeSignedArea(subpaths[0]); const mainSign = mainArea >= 0;
     lines.push(`${indent}<path>`);
     for (let i = 0; i < subpaths.length; i += 1) {
@@ -2046,7 +1813,7 @@
     const lines = [`${indent}<embedScene ${attributes.join(" ")}>`];
     lines.push(...renderTransform(layer.transform, centerX, centerY, indentLevel + 1));
     lines.push(`${childIndent}<fillColor value="#ff000000" />`);
-    lines.push(`${childIndent}${renderSceneOpen("", groupWidth, groupHeight, "#00000000", groupTime, RenderFps, "off")}`);
+    lines.push(`${childIndent}${renderSceneOpen("", groupWidth, groupHeight, "#00000000", groupTime, 24, "off")}`);
     for (const child of layer.layers) lines.push(...renderLayer(child, groupWidth / 2, groupHeight / 2, groupTime, indentLevel + 2));
     lines.push(`${childIndent}</scene>`);
     lines.push(`${indent}</embedScene>`);
@@ -2064,7 +1831,7 @@
     return lines;
   }
   function renderSceneOpen(title, width, height, backgroundColor, totalTime, fps, retime) {
-    return `<scene title="${title}" width="${formatWholeNumber(width)}" height="${formatWholeNumber(height)}" exportWidth="${formatWholeNumber(width)}" exportHeight="${formatWholeNumber(height)}" precompose="dynamicResolution" bgcolor="${backgroundColor}" totalTime="${formatWholeNumber(totalTime)}" fps="${formatWholeNumber(fps)}" modifiedTime="${retime === "freeze" ? Date.now() : 0}" amver="${AlightMotionVersionCode}" ffver="${FileFormatVersion}" am="${AlightMotionVersion}" amplatform="android" retime="${retime}" retimeAdaptFPS="false">`;
+    return `<scene title="${title}" width="${formatWholeNumber(width)}" height="${formatWholeNumber(height)}" exportWidth="${formatWholeNumber(width)}" exportHeight="${formatWholeNumber(height)}" precompose="dynamicResolution" bgcolor="${backgroundColor}" totalTime="${formatWholeNumber(totalTime)}" fps="${formatWholeNumber(fps)}" modifiedTime="0" amver="${AlightMotionVersionCode}" ffver="${FileFormatVersion}" am="${AlightMotionVersion}" amplatform="android" retime="${retime}" retimeAdaptFPS="false">`;
   }
   function formatWholeNumber(value) {
     if (!Number.isFinite(value)) throw new Error(`Cannot format non-finite whole number: ${value}`);
